@@ -26,6 +26,7 @@ func install(args []string) error {
 	flags := flag.NewFlagSet("install", flag.ContinueOnError)
 	config := flags.String("config", "", "configuration file (required)")
 	owner := flags.Int("owner", 0, "UID allowed to control sessions (required)")
+	notifications := flags.String("notifications-bundle", "", "built Lockin Alerts.app bundle (use ./build.sh)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -45,6 +46,11 @@ func install(args []string) error {
 	cfg, err := ParseConfig(data)
 	if err != nil {
 		return err
+	}
+	if cfg.Alerts != nil && cfg.Alerts.Enabled && *notifications == "" {
+		if _, err := os.Stat(notificationExecutable); err != nil {
+			return errors.New("alerts are enabled but the notification helper is missing; install with ./install.sh")
+		}
 	}
 	existing, err := os.ReadFile(filepath.Join(stateDir, "state.json"))
 	if err != nil && !os.IsNotExist(err) {
@@ -140,5 +146,8 @@ func install(args []string) error {
 		time.Sleep(time.Second)
 	}
 	fmt.Println("Installed", binaryPath, "and", launchPath)
+	if err = installNotificationBundle(*notifications, *owner); err != nil {
+		return err
+	}
 	return nil
 }

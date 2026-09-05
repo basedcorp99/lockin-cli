@@ -8,20 +8,22 @@ A macOS focus blocker written in Go. One JSON configuration, one CLI, and a root
 - One emergency break per **manual** session, lasting at most **three minutes**.
 - **No emergency break for scheduled sessions.** No stop, shorten, or reset command.
 - Active restrictions, deadlines, and break usage survive daemon restarts and reboots. Configuration reloads cannot loosen a running session.
+- Optional connection-based reminders while unlocked, with a native **Start lock-in** notification action.
 
 ## Install
 
-Requires **macOS** and **Go 1.26+**. The daemon uses macOS's built-in `pfctl`, `dig`, `dscacheutil`, and `launchctl`. Administrator authorization is required to install the daemon and change system network rules; normal CLI use does not require `sudo`.
+Requires **macOS 12+**, **Go 1.26+**, and **Apple's Command Line Tools** (Clang and the macOS SDK). Full Xcode is not required. The daemon uses macOS's built-in `pfctl`, `dig`, `lsof`, `dscacheutil`, and `launchctl`. A separate Go helper uses a tiny Objective-C `cgo` bridge for native notifications. Administrator authorization is required for installation; normal CLI use does not require `sudo`.
 
 ```sh
 brew install go  # if Go is not installed
+xcode-select --install  # if Apple's Command Line Tools/Xcode are not installed
 
 git clone https://github.com/basedcorp99/lockin-cli.git
 cd lockin-cli
 ./install.sh
 ```
 
-The installer builds locally and creates `~/.config/lockin/config.json` only if it does not already exist. The example schedule is **disabled**, so installation does not unexpectedly start a lock. Existing session state is preserved when reinstalling or upgrading.
+The installer builds the CLI and locally signs the background notification helper. It creates `~/.config/lockin/config.json` only if absent. Example schedules and alerts are **disabled**, so installation does not unexpectedly start a lock or request notification permission. Existing session state is preserved when reinstalling or upgrading.
 
 Edit the configuration before starting your first session:
 
@@ -44,10 +46,13 @@ lockin reload --config /absolute/path/to/config.json
 Or build and install explicitly:
 
 ```sh
-go build -trimpath -o lockin .
-./lockin init                       # refuses to overwrite existing configuration
-./lockin check
-sudo ./lockin install --owner "$(id -u)" --config "$HOME/.config/lockin/config.json"
+./build.sh
+./build/lockin init                 # refuses to overwrite existing configuration
+./build/lockin check
+sudo ./build/lockin install --owner "$(id -u)" \
+  --config "$HOME/.config/lockin/config.json" \
+  --notifications-bundle "$PWD/build/Lockin Alerts.app"
+lockin reload
 ```
 
 ## Commands
@@ -61,7 +66,11 @@ sudo ./lockin install --owner "$(id -u)" --config "$HOME/.config/lockin/config.j
 | `lockin check [--config PATH]` | Validate a configuration without changing daemon state. |
 | `lockin reload [--config PATH]` | Accept a configuration without restarting the daemon. |
 | `lockin init [--config PATH]` | Create a minimal example, never overwriting an existing file. |
+| `lockin alerts status` | Show detector health and the current native notification permission without prompting. |
+| `lockin alerts authorize` | Explicitly request permission for native notifications as the logged-in user. |
 | `lockin help` | Show the built-in command reference. |
+
+Human-readable output is command-specific: starting or taking a break prints only that result, and `status` shows active lock-ins and emergency-break availability. Use `status --json` for full daemon state and `alerts status` for notification diagnostics.
 
 Durations use [Go duration syntax](https://pkg.go.dev/time#ParseDuration): `45s`, `90m`, `2h`, `1h15m30s`, or `1.5h`. Units are required, the minimum is one second, and overflow is rejected. For a day, use `24h`; `d` and `w` are not supported.
 
@@ -109,6 +118,7 @@ Start with [`config.example.json`](config.example.json). Unknown fields, malform
 | `hosts` | DNS names, IP addresses, or CIDRs. A blocklist must not be empty. An empty allowlist blocks all non-exempt outbound destinations. |
 | `timezone` | Optional IANA timezone, such as `Europe/Rome` or `America/New_York`. Omitted or `Local` uses the machine's local timezone at daemon startup. Use an explicit timezone for predictable travel behavior. |
 | `schedules` | Optional array. Omit or use `[]` for manual sessions only. |
+| `alerts` | Optional reminder settings. Absent or `enabled: false` means no connection sampling or reminders. |
 
 DNS names also include their `www.` variant. Other subdomains must be listed explicitly. Use ASCII/Punycode names; URLs, paths, ports, wildcard domains, and scoped IPv6 addresses are not supported. Hostnames are normalized to lowercase; CIDRs are masked to their network boundary.
 
@@ -165,6 +175,64 @@ Overlapping policies combine restrictively: blocklists form a union, and allowli
 
 The daemon evaluates schedules every second and on startup. Waking or booting inside a schedule activates its remaining window; a window entirely missed while powered off is not replayed. Manual session deadlines continue through sleep and power-off. Reboot recovery is implemented through persisted state and launchd; enforcement cannot run while macOS is not running.
 
+## Connection-based alerts
+
+Alerts are optional and never alter blocking rules. Add this object to your configuration:
+
+```json
+"alerts": {
+  "enabled": true,
+  "interval": "10m",
+  "message": "Possible activity on a distracting site. Want to start a lock-in session?",
+  "session_duration": "1h"
+}
+```
+
+Then, as your normal logged-in user:
+
+```sh
+lockin check
+lockin reload
+lockin alerts authorize  # explicitly opens the macOS permission request
+lockin alerts status
+```
+
+Installation and background startup do **not** request permission automatically. You can defer `authorize` until convenient. If you previously denied permission, enable **Lockin Alerts** under **System Settings → Notifications**. Focus modes and macOS notification settings can hide or delay banners.
+
+| Alert field | Meaning |
+| --- | --- |
+| `enabled` | Required opt-in; otherwise false. |
+| `interval` | Sampling interval, default `10m`; between `1m` and `24h`. |
+| `message` | Custom notification text, up to 500 characters with no control characters. Omitted uses the message above. |
+| `session_duration` | Duration started by the notification action, default `1h`; same syntax/minimum as `start`. |
+
+### What gets checked
+
+At the interval, the daemon takes a bounded snapshot of the **installed owner's** current network connections: established TCP and UDP sockets with a known remote endpoint. It compares destination IPs with configured IP/CIDR entries and fresh forward-DNS answers for configured domains and their `www.` variants.
+
+- **Blocklist:** a matching destination can generate a reminder.
+- **Allowlist:** a public destination outside the allowed set can generate a reminder. Local/infrastructure traffic is excluded to reduce noise.
+- There is no packet capture, reverse-DNS lookup, browser integration, or stored connection/browsing history.
+- No scans or reminders occur during any manual or scheduled session, **including an emergency break**. A session beginning during a scan discards that scan's result.
+- DNS/sampling failures are reported separately from firewall health; uncertain samples do not generate an alert.
+- Shared IPs, idle connections, buffered content, unconnected UDP, CDN address changes, and VPN/proxy encapsulation limit accuracy. A match means **possible activity**, not proof that a particular website is in use.
+
+The unprivileged helper checks the daemon for notification work every 15 seconds; those small IPC checks are **not network-connection scans**. Sampling itself remains at the configured interval. Only one scan runs at a time, outside the blocking control loop.
+
+### Starting from the notification
+
+The native notification includes an explicit duration-labelled **Start lock-in** action; macOS may put it under **Options**. Merely clicking the notification body does not start a session.
+
+The daemon rechecks the offered action before starting: alerts must still be enabled, no session may be active, and the offer must be current and unused. A configuration reload, daemon restart, expiry, or another session invalidates an old offer. The button cannot start an arbitrary duration or bypass existing session rules.
+
+Only one current reminder is retained. Starting a session or disabling alerts clears it on the helper's next poll. Clicking a valid action commits a normal manual session with the usual single emergency break. Errors are reported rather than silently replacing a running session.
+
+### Background helper and permissions
+
+**Lockin Alerts** is a minimal app bundle under `/Library/Application Support/lockin/`, not a normal windowed application in `/Applications`. It has no Dock item, Command-Tab entry, menu-bar item, or custom popup. It does appear in Notification settings and, while running, Activity Monitor.
+
+The helper runs in the installed user's GUI session, never as root. Its app registration has no ongoing polling cost; the helper process itself remains idle between IPC checks. Local builds use ad-hoc signing; notification permission may need to be granted again after a rebuild. Developer ID signing/notarization is a separate distribution concern, not a requirement for building locally.
+
 ## Enforcement and limits
 
 The daemon manages only its own `/etc/hosts` section and PF anchor, `com.apple/000.lockin`. It does not rewrite `/etc/pf.conf`, replace other services' anchors, or globally disable PF. If the running filter ruleset is empty, it installs the standard `com.apple/*` anchor hook using a filter-only load. A nonempty incompatible ruleset is rejected rather than overwritten.
@@ -187,6 +255,9 @@ This is a focus tool, **not a security boundary against an administrator**. Root
 | `/Library/LaunchDaemons/local.lockin.daemon.plist` | Root daemon, automatically restarted by launchd. |
 | `/var/db/lockin/` | Root-only session state, firewall recovery data, and `daemon.log`. |
 | `/var/run/lockin/control.sock` | Control socket accessible only to the installed owner UID and root. |
+| `/Library/Application Support/lockin/Lockin Alerts.app` | Locally signed, unprivileged notification helper. |
+| `/Library/LaunchAgents/local.lockin.notifications.plist` | Starts the helper at graphical login; it exits immediately for other user IDs. |
+| `~/Library/Caches/local.lockin.notifications/` | Helper lock and the last notification-delivery receipt; no connection endpoints or browsing history. |
 
 The daemon starts from its **last accepted, durable configuration**, not unsubmitted edits to the user file. Always run `lockin reload` after editing. Only the installed owner's account can control it without root.
 
@@ -194,16 +265,18 @@ For diagnostics:
 
 ```sh
 lockin status --json
+lockin alerts status
 sudo cat /var/db/lockin/daemon.log
 launchctl print system/local.lockin.daemon
 ```
 
-For an upgrade, pull the new source and rerun `./install.sh`. Installation replaces the binary and restarts launchd while preserving existing sessions and accepted configuration. It does not use reinstalling as a way to reset a session.
+For an upgrade, pull the new source and rerun `./install.sh`. Installation replaces the executables and restarts launchd while preserving active sessions. The script then reloads the supplied configuration for future sessions and alert settings. Reinstalling cannot reset a session. Notification permission is still requested only by `lockin alerts authorize`.
 
 ## Development
 
 ```sh
-go build -o lockin .
+./build.sh                         # CLI plus signed native notification bundle
+CGO_ENABLED=0 go build -o lockin . # CLI/daemon alone; no native compiler required
 go test -race ./...
 go vet ./...
 ```
@@ -214,6 +287,8 @@ The implementation is split by responsibility:
 - `engine.go`: deterministic schedule/session transitions with immutable active policies.
 - `daemon.go`: single-owner control loop, atomic state persistence, Unix socket.
 - `firewall.go`: macOS PF, DNS resolution, hosts preservation, failure recovery.
-- `main.go`, `install.go`: command-line interface and launchd installation.
+- `alerts.go`: bounded periodic connection snapshots, policy matching, reminder cadence, and stale-action checks.
+- `cmd/lockin-notify/`: Go notification worker and tiny Objective-C AppKit/UserNotifications bridge.
+- `main.go`, `install.go`, `notification_*.go`: CLI commands, native-helper installation, and launchd integration.
 
-Regression tests cover DST gaps/folds, overnight/overlapping schedules, reload and restart invariants, emergency-use persistence, persistence failures, network-policy intersection, and preservation of unrelated hosts entries. Privileged live verification is separate from the normal test suite because it changes the machine's actual networking.
+Regression tests cover DST gaps/folds, overnight/overlapping schedules, reload and restart invariants, emergency-use persistence, persistence failures, network-policy intersection, preservation of unrelated hosts entries, connection parsing/matching, alert cadence/suppression, stale notification actions, and configured-duration session commits. Privileged live verification is separate from the normal test suite because it changes the machine's actual networking.

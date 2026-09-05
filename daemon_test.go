@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -72,5 +74,61 @@ func TestFailedEnforcementRetainsSessionAcrossRecovery(t *testing.T) {
 	}
 	if got := recovered.state.Sessions[0].End; !got.Equal(now.Add(time.Second + time.Hour)) {
 		t.Fatalf("session deadline changed: %v", got)
+	}
+}
+
+func TestNotificationActionStartsConfiguredDurableSessionOnce(t *testing.T) {
+	manager, state, now := alertTestManager(t)
+	state.Config.Alerts.SessionDuration = "7s"
+	manager.Configure(state.Config, now)
+	manager.sample = func(context.Context, int, Policy) (bool, error) { return true, nil }
+	offer := offerFromTestSample(t, manager, state, now.Add(time.Minute))
+	path := filepath.Join(t.TempDir(), "state.json")
+	svc := service{
+		state: state, alerts: manager, firewall: &observedEnforcement{},
+		persist: func(s State) error { return saveJSON(path, s) },
+	}
+	clicked := now.Add(time.Minute + 2*time.Second)
+	result := svc.handle(request{Command: "notification-start", AlertID: offer.ID, Duration: int64(24 * time.Hour)}, clicked)
+	if result.Error != "" {
+		t.Fatal(result.Error)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted State
+	if err := decodeStrict(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.Sessions) != 1 || persisted.Sessions[0].Kind != "manual" || !persisted.Sessions[0].End.Equal(clicked.Add(7*time.Second)) {
+		t.Fatalf("action did not durably start the displayed duration: %+v", persisted.Sessions)
+	}
+	if result := svc.handle(request{Command: "notification-start", AlertID: offer.ID}, clicked.Add(time.Second)); result.Error == "" {
+		t.Fatal("reusing notification action changed the active session")
+	}
+	poll := svc.handle(request{Command: "notification-poll", Permission: "authorized", AcknowledgedID: offer.ID}, clicked.Add(2*time.Second))
+	if poll.Alert != nil || !poll.AlertsClear {
+		t.Fatal("active session left an actionable reminder")
+	}
+}
+
+func TestNotificationActionPersistenceFailureDoesNotConsumeOffer(t *testing.T) {
+	manager, state, now := alertTestManager(t)
+	manager.sample = func(context.Context, int, Policy) (bool, error) { return true, nil }
+	offer := offerFromTestSample(t, manager, state, now.Add(time.Minute))
+	svc := service{
+		state: state, alerts: manager, firewall: &observedEnforcement{},
+		persist: func(State) error { return errors.New("disk full") },
+	}
+	clicked := now.Add(time.Minute + 2*time.Second)
+	if result := svc.handle(request{Command: "notification-start", AlertID: offer.ID}, clicked); result.Error == "" {
+		t.Fatal("action claimed success without durable session state")
+	}
+	if len(svc.state.Sessions) != 0 {
+		t.Fatal("failed transaction changed active sessions")
+	}
+	if _, err := manager.Start(state, clicked, offer.ID); err != nil {
+		t.Fatalf("failed commit consumed the offer: %v", err)
 	}
 }

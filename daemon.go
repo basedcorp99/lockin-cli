@@ -31,6 +31,7 @@ type service struct {
 	persist   func(State) error
 	health    string
 	lastApply time.Time
+	alerts    *AlertManager
 }
 
 func atomicWrite(path string, data []byte, mode os.FileMode) error {
@@ -121,13 +122,30 @@ func (s *service) reconcile(now time.Time, force bool) error {
 }
 func (s *service) handle(req request, now time.Time) response {
 	err := s.reconcile(now, false)
-	if err == nil && req.Command != "status" {
+	if s.alerts != nil {
+		s.alerts.Tick(s.state, now)
+	}
+	var offer *AlertOffer
+	if req.Command == "notification-poll" && s.alerts != nil {
+		offer = s.alerts.Poll(s.state, now, req.Permission, req.AcknowledgedID, req.DeliveryError)
+	}
+	if err == nil && req.Command != "status" && req.Command != "notification-poll" {
 		next := cloneState(s.state)
 		switch req.Command {
 		case "start":
 			err = StartManual(&next, now, time.Duration(req.Duration))
 		case "break":
 			err = TakeBreak(&next, now)
+		case "notification-start":
+			if s.alerts == nil {
+				err = errors.New("alerts are unavailable")
+			} else {
+				var duration time.Duration
+				duration, err = s.alerts.Start(s.state, now, req.AlertID)
+				if err == nil {
+					err = StartManual(&next, now, duration)
+				}
+			}
 		case "reload":
 			if req.Config == nil {
 				err = errors.New("reload requires configuration")
@@ -140,12 +158,26 @@ func (s *service) handle(req request, now time.Time) response {
 		}
 		if err == nil {
 			err = s.commit(next)
+			if err == nil && s.alerts != nil {
+				if req.Command == "reload" {
+					s.alerts.Configure(s.state.Config, now)
+				}
+				if req.Command == "notification-start" {
+					s.alerts.Consume(req.AlertID)
+				}
+			}
 			if err == nil {
 				err = s.reconcile(now, true)
 			}
 		}
 	}
 	r := response{State: s.state, Now: now, EnforcementError: s.health}
+	if s.alerts != nil {
+		s.alerts.Tick(s.state, now)
+		status := s.alerts.Status()
+		r.Alerts, r.Alert = &status, offer
+		r.AlertsEnabled, r.AlertsClear = status.Enabled, !status.Pending
+	}
 	if err != nil {
 		r.Error = err.Error()
 	}
@@ -201,7 +233,9 @@ func runDaemon() error {
 	if err != nil {
 		return err
 	}
-	svc := service{state: state, firewall: fw, persist: func(s State) error { return saveJSON(filepath.Join(stateDir, "state.json"), s) }}
+	alerts := NewAlertManager(meta.Owner)
+	alerts.Configure(state.Config, time.Now())
+	svc := service{state: state, firewall: fw, alerts: alerts, persist: func(s State) error { return saveJSON(filepath.Join(stateDir, "state.json"), s) }}
 	// A transient firewall failure must not prevent the control socket from exposing it.
 	if err = svc.reconcile(time.Now(), true); err != nil {
 		log.Printf("initial enforcement: %v", err)
@@ -254,6 +288,7 @@ func runDaemon() error {
 			if e := svc.reconcile(time.Now(), false); e != nil {
 				log.Printf("enforcement: %v", e)
 			}
+			svc.alerts.Tick(svc.state, time.Now())
 		case msg := <-queue:
 			msg.reply <- svc.handle(msg.req, time.Now())
 		}

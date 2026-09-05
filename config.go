@@ -19,10 +19,11 @@ type Policy struct {
 }
 
 type Config struct {
-	Mode      string     `json:"mode"`
-	Hosts     []string   `json:"hosts"`
-	Timezone  string     `json:"timezone,omitempty"`
-	Schedules []Schedule `json:"schedules,omitempty"`
+	Mode      string       `json:"mode"`
+	Hosts     []string     `json:"hosts"`
+	Timezone  string       `json:"timezone,omitempty"`
+	Schedules []Schedule   `json:"schedules,omitempty"`
+	Alerts    *AlertConfig `json:"alerts,omitempty"`
 }
 
 // Days name the day a recurring window starts. End <= Start ends the next day.
@@ -88,6 +89,9 @@ func ValidateConfig(cfg Config) error {
 		}
 	}
 	if _, err := configLocation(cfg); err != nil {
+		return err
+	}
+	if _, err := resolveAlertConfig(cfg.Alerts); err != nil {
 		return err
 	}
 	ids := make(map[string]bool, len(cfg.Schedules))

@@ -30,7 +30,10 @@ const help = `lockin — CLI-only macOS focus sessions
   lockin init [--config PATH]
                             Write an example configuration; never overwrite
   sudo lockin install --owner UID --config PATH
-                            Install root launchd daemon and CLI
+                            Install root daemon; add --notifications-bundle PATH
+                            for the app bundle produced by ./build.sh
+  lockin alerts status      Show detector health and notification permission
+  lockin alerts authorize   Request native notification permission explicitly
 
 Default configuration: ~/.config/lockin/config.json
 Duration: positive, at least one second; explicit units required.
@@ -77,6 +80,8 @@ func run(args []string) error {
 		return runDaemon()
 	case "install":
 		return install(args[1:])
+	case "alerts":
+		return alertsCommand(args[1:])
 	case "init", "check", "reload":
 		flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 		path := flags.String("config", configPath(), "configuration path")
@@ -94,7 +99,13 @@ func run(args []string) error {
 			if err != nil {
 				return err
 			}
-			_, err = f.WriteString("{\n  \"mode\": \"blocklist\",\n  \"hosts\": [\"example.com\"],\n  \"timezone\": \"Local\",\n  \"schedules\": []\n}\n")
+			encoder := json.NewEncoder(f)
+			encoder.SetIndent("", "  ")
+			err = encoder.Encode(Config{
+				Mode: "blocklist", Hosts: []string{"example.com"}, Timezone: "Local",
+				Schedules: []Schedule{},
+				Alerts:    &AlertConfig{Interval: "10m", SessionDuration: "1h"},
+			})
 			closeErr := f.Close()
 			if err != nil {
 				return err
@@ -143,15 +154,23 @@ func run(args []string) error {
 }
 
 type request struct {
-	Command  string  `json:"command"`
-	Duration int64   `json:"duration,omitempty"`
-	Config   *Config `json:"config,omitempty"`
+	Command        string  `json:"command"`
+	Duration       int64   `json:"duration,omitempty"`
+	Config         *Config `json:"config,omitempty"`
+	Permission     string  `json:"permission,omitempty"`
+	AcknowledgedID string  `json:"acknowledged_id,omitempty"`
+	DeliveryError  string  `json:"delivery_error,omitempty"`
+	AlertID        string  `json:"alert_id,omitempty"`
 }
 type response struct {
-	Error            string    `json:"error,omitempty"`
-	EnforcementError string    `json:"enforcement_error,omitempty"`
-	State            State     `json:"state"`
-	Now              time.Time `json:"now"`
+	Error            string       `json:"error,omitempty"`
+	EnforcementError string       `json:"enforcement_error,omitempty"`
+	State            State        `json:"state"`
+	Now              time.Time    `json:"now"`
+	Alerts           *AlertStatus `json:"alerts,omitempty"`
+	Alert            *AlertOffer  `json:"alert,omitempty"`
+	AlertsEnabled    bool         `json:"alerts_enabled"`
+	AlertsClear      bool         `json:"alerts_clear"`
 }
 
 func call(req request) (response, error) {
@@ -175,45 +194,107 @@ func call(req request) (response, error) {
 }
 func callAndPrint(req request, asJSON bool) error {
 	r, err := call(req)
+	if err == nil && strings.TrimSpace(r.EnforcementError) != "" {
+		err = fmt.Errorf("enforcement unhealthy: %s", r.EnforcementError)
+	}
 	if asJSON {
+		if err != nil && r.Error == "" {
+			r.Error = err.Error()
+		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		if e := enc.Encode(r); e != nil {
 			return e
 		}
-	} else {
-		if r.Now.IsZero() {
-			return err
-		}
-		if len(r.State.Sessions) == 0 {
-			fmt.Println("No active session.")
-		} else {
-			for _, s := range r.State.Sessions {
-				remaining := s.End.Sub(r.Now).Round(time.Second)
-				status := "locked"
-				if r.Now.Before(s.BreakUntil) {
-					status = "break until " + s.BreakUntil.Local().Format(time.RFC3339)
-				}
-				allowance := "no break (scheduled)"
-				if s.Kind == "manual" {
-					allowance = "one 3m break available"
-					if s.BreakUsed {
-						allowance = "break already used"
-					}
-				}
-				fmt.Printf("%s: %s; %s remaining; ends %s; %s\n", s.Kind, status, remaining, s.End.Local().Format(time.RFC3339), allowance)
-			}
-		}
-		fmt.Printf("Configuration: %s; %d hosts; %d schedules; timezone %s\n", r.State.Config.Mode, len(r.State.Config.Hosts), len(r.State.Config.Schedules), r.State.Config.Timezone)
-		if req.Command == "reload" && err == nil {
-			fmt.Println("Configuration reloaded. Active sessions are unchanged.")
-		}
-	}
-	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(r.EnforcementError) != "" {
-		return fmt.Errorf("enforcement unhealthy: %s", r.EnforcementError)
+	if r.Now.IsZero() || (err != nil && req.Command != "status") {
+		return err
 	}
-	return nil
+	printHumanResponse(req.Command, r)
+	return err
+}
+
+func shortDuration(duration time.Duration) string {
+	duration = max(0, duration.Round(time.Second))
+	if duration > 0 && duration%time.Hour == 0 {
+		return fmt.Sprintf("%dh", duration/time.Hour)
+	}
+	if duration > 0 && duration%time.Minute == 0 {
+		return fmt.Sprintf("%dm", duration/time.Minute)
+	}
+	return duration.String()
+}
+
+func localDeadline(deadline, now time.Time) string {
+	deadline, now = deadline.Local(), now.Local()
+	if deadline.Year() == now.Year() && deadline.YearDay() == now.YearDay() {
+		return deadline.Format("15:04:05")
+	}
+	return deadline.Format("2006-01-02 15:04:05")
+}
+
+func printHumanResponse(command string, r response) {
+	switch command {
+	case "reload":
+		if len(r.State.Sessions) > 0 {
+			fmt.Println("Configuration reloaded. Active lock-ins unchanged.")
+		} else {
+			fmt.Println("Configuration reloaded.")
+		}
+	case "start":
+		for _, session := range r.State.Sessions {
+			if session.Kind == "manual" {
+				fmt.Printf("Locked in for %s. Ends at %s.\n",
+					shortDuration(session.End.Sub(session.Start)), localDeadline(session.End, r.Now))
+				return
+			}
+		}
+	case "break":
+		for _, session := range r.State.Sessions {
+			if session.Kind == "manual" && r.Now.Before(session.BreakUntil) {
+				if session.BreakUntil.Equal(session.End) {
+					fmt.Printf("Emergency break for the final %s. Session ends at %s.\n",
+						shortDuration(session.End.Sub(r.Now)), localDeadline(session.End, r.Now))
+				} else {
+					fmt.Printf("Emergency break for %s. Resumes at %s.\n",
+						shortDuration(session.BreakUntil.Sub(r.Now)), localDeadline(session.BreakUntil, r.Now))
+				}
+				return
+			}
+		}
+	case "status":
+		if len(r.State.Sessions) == 0 {
+			fmt.Println("No active lock-in.")
+			return
+		}
+		scheduled := hasActiveSchedule(r.State, r.Now)
+		for _, session := range r.State.Sessions {
+			title := "Lock-in"
+			if session.Kind == "schedule" {
+				title = "Scheduled lock-in"
+			}
+			fmt.Printf("%s: %s remaining (ends %s).\n",
+				title, shortDuration(session.End.Sub(r.Now)), localDeadline(session.End, r.Now))
+			if session.Kind != "manual" {
+				continue
+			}
+			switch {
+			case r.Now.Before(session.BreakUntil):
+				if session.BreakUntil.Equal(session.End) {
+					fmt.Println("Emergency break active until the session ends.")
+				} else {
+					fmt.Printf("Emergency break: %s remaining (resumes %s).\n",
+						shortDuration(session.BreakUntil.Sub(r.Now)), localDeadline(session.BreakUntil, r.Now))
+				}
+			case session.BreakUsed:
+				fmt.Println("Emergency break used.")
+			case !scheduled:
+				fmt.Println("One 3-minute emergency break available.")
+			}
+		}
+		if scheduled {
+			fmt.Println("Emergency breaks are unavailable while a scheduled lock-in is active.")
+		}
+	}
 }

@@ -4,6 +4,12 @@
     "example.com"
   ],
   "timezone": "Local",
+  "alerts": {
+    "enabled": false,
+    "interval": "10m",
+    "message": "Possible activity on a distracting site. Want to start a lock-in session?",
+    "session_duration": "1h"
+  },
   "schedules": [
     {
       "id": "workdays",

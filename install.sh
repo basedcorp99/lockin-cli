@@ -27,7 +27,7 @@ esac
 build_dir=$(mktemp -d "${TMPDIR:-/tmp}/lockin-build.XXXXXX")
 trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
 
-(cd "$project_dir" && go build -trimpath -o "$build_dir/lockin" .)
+"$project_dir/build.sh" "$build_dir"
 if [ ! -e "$config" ]; then
     mkdir -p "$(dirname -- "$config")"
     # noclobber also protects against a file appearing after the existence check.
@@ -35,9 +35,11 @@ if [ ! -e "$config" ]; then
     echo "Created $config (example schedule is disabled)."
 fi
 "$build_dir/lockin" check --config "$config"
-sudo "$build_dir/lockin" install --owner "$(id -u)" --config "$config"
+sudo "$build_dir/lockin" install --owner "$(id -u)" --config "$config" --notifications-bundle "$build_dir/Lockin Alerts.app"
+"/usr/local/bin/lockin" reload --config "$config"
 "/usr/local/bin/lockin" status
 printf '\nConfiguration: %s\nEdit it, then run: lockin reload --config "%s"\n' "$config" "$config"
+echo 'Native notifications remain opt-in. When ready, run: lockin alerts authorize'
 case ":$PATH:" in
     *:/usr/local/bin:*) ;;
     *) echo 'Add /usr/local/bin to your shell PATH to invoke lockin by name.' ;;
