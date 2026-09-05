@@ -1,0 +1,4 @@
+/lockin
+*.test
+coverage.out
+/config.json

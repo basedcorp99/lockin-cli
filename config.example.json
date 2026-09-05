@@ -1,0 +1,16 @@
+{
+  "mode": "blocklist",
+  "hosts": [
+    "example.com"
+  ],
+  "timezone": "Local",
+  "schedules": [
+    {
+      "id": "workdays",
+      "enabled": false,
+      "days": ["mon", "tue", "wed", "thu", "fri"],
+      "start": "09:00",
+      "end": "17:00"
+    }
+  ]
+}
