@@ -64,7 +64,7 @@ lockin reload
 | `lockin status` | Show active sessions, deadlines, break allowance, and enforcement errors. |
 | `lockin status --json` | Return structured state and enforcement health. Exits nonzero on an error. |
 | `lockin check [--config PATH]` | Validate a configuration without changing daemon state. |
-| `lockin reload [--config PATH]` | Accept a configuration without restarting the daemon. |
+| `lockin reload [--config PATH]` | Accept configuration and add blocks to running blocklist sessions without removing existing blocks. |
 | `lockin init [--config PATH]` | Create a minimal example, never overwriting an existing file. |
 | `lockin alerts status` | Show detector health and the current native notification permission without prompting. |
 | `lockin alerts authorize` | Explicitly request permission for native notifications as the logged-in user. |
@@ -169,7 +169,9 @@ An occurrence is consumed once. Reusing a completed one-time schedule's ID does 
 
 ### Reload, overlap, and sleep
 
-`reload` changes the accepted configuration for future sessions. It first records any schedule already active under the old configuration, then evaluates the new configuration. A newly enabled schedule whose time window includes now starts immediately. Removing or editing a running schedule cannot change its captured policy or end time.
+`reload` immediately adds configured blocked hosts to every running **blocklist** session. Removing a host from the configuration cannot remove it from a running session, including a block added by an earlier reload. The additions are saved durably before firewall enforcement and survive restarts. Reloading preserves session deadlines and emergency-break usage; an in-progress break continues normally, with the added blocks enforced when it ends.
+
+Allowlist edits and policy-mode changes apply only to future sessions. Reload first records any schedule already active under the old configuration, then evaluates the new configuration. A newly enabled schedule whose time window includes now starts immediately. Removing or editing a running schedule cannot weaken its captured restrictions or change its end time.
 
 Overlapping policies combine restrictively: blocklists form a union, and allowlists intersect. A manual break does not suspend a scheduled policy.
 
@@ -270,7 +272,7 @@ sudo cat /var/db/lockin/daemon.log
 launchctl print system/local.lockin.daemon
 ```
 
-For an upgrade, pull the new source and rerun `./install.sh`. Installation replaces the executables and restarts launchd while preserving active sessions. The script then reloads the supplied configuration for future sessions and alert settings. Reinstalling cannot reset a session. Notification permission is still requested only by `lockin alerts authorize`.
+For an upgrade, pull the new source and rerun `./install.sh`. Installation replaces the executables and restarts launchd while preserving active sessions. The script then reloads the supplied configuration, applying additional blocks to running blocklist sessions and updating future-session configuration and alert settings. Reinstalling cannot reset a session. Notification permission is still requested only by `lockin alerts authorize`.
 
 ## Development
 
@@ -284,7 +286,7 @@ go vet ./...
 The implementation is split by responsibility:
 
 - `config.go`: strict configuration validation and duration parsing.
-- `engine.go`: deterministic schedule/session transitions with immutable active policies.
+- `engine.go`: deterministic schedule/session transitions with non-loosening active policies.
 - `daemon.go`: single-owner control loop, atomic state persistence, Unix socket.
 - `firewall.go`: macOS PF, DNS resolution, hosts preservation, failure recovery.
 - `alerts.go`: bounded periodic connection snapshots, policy matching, reminder cadence, and stale-action checks.

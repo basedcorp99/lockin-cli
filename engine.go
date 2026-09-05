@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -22,12 +23,12 @@ type State struct {
 	// Recurring occurrences expire after their civil date is no longer reachable
 	// in any timezone. One-time occurrences have a zero expiry and stay recorded.
 	// Keeping this separate from sessions prevents config edits resurrecting an
-	// already completed occurrence or replacing its original policy snapshot.
+	// already completed occurrence or replacing its original deadline.
 	Occurrences map[string]time.Time `json:"occurrences,omitempty"`
 }
 
 // Advance catches active windows after sleep/restart, without replaying windows
-// that ended while offline. Already-started sessions are immutable snapshots.
+// that ended while offline. Already-started sessions keep their deadlines.
 // The caller must persist changed state before applying its active policies.
 func Advance(state *State, now time.Time) bool {
 	changed := false
@@ -185,6 +186,31 @@ func civilTime(value time.Time) time.Time {
 
 func snapshotPolicy(cfg Config) Policy {
 	return Policy{Mode: cfg.Mode, Hosts: append([]string(nil), cfg.Hosts...)}
+}
+
+// Reloads may add blocks, never remove them from a running blocklist session.
+// Copy on write preserves the committed policy if persistence later fails.
+func tightenBlocklists(state *State, cfg Config) {
+	if cfg.Mode != "blocklist" {
+		return
+	}
+	for i := range state.Sessions {
+		session := &state.Sessions[i]
+		if session.Policy.Mode != "blocklist" {
+			continue
+		}
+		hosts := session.Policy.Hosts
+		for _, host := range cfg.Hosts {
+			if slices.Contains(hosts, host) {
+				continue
+			}
+			if len(hosts) == len(session.Policy.Hosts) {
+				hosts = slices.Grow(slices.Clip(hosts), len(cfg.Hosts))
+			}
+			hosts = append(hosts, host)
+		}
+		session.Policy.Hosts = hosts
+	}
 }
 
 // Persisted sessions have already started; a backwards clock change must not

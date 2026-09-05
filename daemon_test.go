@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -130,5 +131,86 @@ func TestNotificationActionPersistenceFailureDoesNotConsumeOffer(t *testing.T) {
 	}
 	if _, err := manager.Start(state, clicked, offer.ID); err != nil {
 		t.Fatalf("failed commit consumed the offer: %v", err)
+	}
+}
+
+func TestReloadTightensActiveBlocklistDurablyWithoutResettingBreak(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	state := State{Config: Config{Mode: "blocklist", Hosts: []string{"example.com"}, Timezone: "UTC"}}
+	if err := StartManual(&state, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := TakeBreak(&state, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	original := state.Sessions[0]
+	cfg := state.Config
+	cfg.Hosts = []string{"example.net"}
+	// An older daemon may already have accepted these hosts without applying
+	// them to the captured session. Reload must not depend on a config diff.
+	state.Config = cfg
+	path := filepath.Join(t.TempDir(), "state.json")
+	svc := service{
+		state: state, firewall: &observedEnforcement{},
+		persist: func(s State) error { return saveJSON(path, s) },
+	}
+	reloaded := now.Add(2 * time.Minute)
+	if result := svc.handle(request{Command: "reload", Config: &cfg}, reloaded); result.Error != "" {
+		t.Fatal(result.Error)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored State
+	if err := decodeStrict(data, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if len(ActivePolicies(restored, reloaded)) != 0 {
+		t.Fatal("adding a block cancelled the emergency break")
+	}
+	active := ActivePolicies(restored, original.BreakUntil)
+	if len(active) != 1 || !slices.Contains(active[0].Hosts, "example.com") || !slices.Contains(active[0].Hosts, "example.net") {
+		t.Fatalf("resumed session did not preserve old and new blocks after restart: %+v", active)
+	}
+	got := restored.Sessions[0]
+	if got.ID != original.ID || !got.Start.Equal(original.Start) || !got.End.Equal(original.End) ||
+		got.BreakUsed != original.BreakUsed || !got.BreakUntil.Equal(original.BreakUntil) {
+		t.Fatalf("reload changed session lifetime or emergency allowance: %+v", got)
+	}
+	svc.state = restored
+	cfg.Hosts = []string{"example.com"}
+	if result := svc.handle(request{Command: "reload", Config: &cfg}, original.BreakUntil); result.Error != "" {
+		t.Fatal(result.Error)
+	}
+	active = ActivePolicies(svc.state, original.BreakUntil)
+	if len(active) != 1 || !slices.Contains(active[0].Hosts, "example.net") {
+		t.Fatal("removing a newly added block loosened the running session")
+	}
+	if err := TakeBreak(&svc.state, original.BreakUntil); err == nil {
+		t.Fatal("reload restored a consumed emergency break")
+	}
+}
+
+func TestFailedReloadDoesNotChangeAcceptedRestrictions(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	state := State{Config: Config{Mode: "blocklist", Hosts: []string{"example.com"}, Timezone: "UTC"}}
+	if err := StartManual(&state, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	svc := service{
+		state: state, firewall: &observedEnforcement{},
+		persist: func(State) error { return errors.New("disk full") },
+	}
+	cfg := state.Config
+	cfg.Hosts = []string{"example.net"}
+	result := svc.handle(request{Command: "reload", Config: &cfg}, now.Add(time.Second))
+	if result.Error == "" {
+		t.Fatal("reload succeeded without durable state")
+	}
+	active := ActivePolicies(svc.state, now.Add(time.Second))
+	if len(active) != 1 || !slices.Equal(active[0].Hosts, []string{"example.com"}) ||
+		!slices.Equal(svc.state.Config.Hosts, []string{"example.com"}) {
+		t.Fatal("failed reload changed accepted restrictions")
 	}
 }

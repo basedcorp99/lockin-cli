@@ -86,7 +86,7 @@ func decodeStrict(data []byte, v any) error {
 	return nil
 }
 func cloneState(s State) State {
-	// Policies and configuration are immutable snapshots; only lifecycle fields mutate.
+	// Configuration is immutable; policy host additions use copy on write.
 	s.Sessions = slices.Clone(s.Sessions)
 	s.Occurrences = maps.Clone(s.Occurrences)
 	return s
@@ -151,6 +151,7 @@ func (s *service) handle(req request, now time.Time) response {
 				err = errors.New("reload requires configuration")
 			} else if err = ValidateConfig(*req.Config); err == nil {
 				next.Config = *req.Config
+				tightenBlocklists(&next, next.Config)
 				Advance(&next, now)
 			}
 		default:

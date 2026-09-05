@@ -39,7 +39,8 @@ Default configuration: ~/.config/lockin/config.json
 Duration: positive, at least one second; explicit units required.
 There is deliberately no stop, shorten, or reset command.
 Scheduled sessions cannot take a break. A schedule interrupts a manual break.
-Reload affects future sessions only; active policy/end/break usage are retained.
+Reload adds blocks to running blocklist sessions; existing blocks stay until expiry.
+Allowlist/mode changes affect future sessions. Deadlines and break usage are retained.
 Sessions survive daemon restarts and reboot. Schedules catch up after sleep.
 The session timer continues during a break and while the machine is asleep.
 Config uses mode (blocklist/allowlist), hosts, timezone, and optional schedules.
@@ -238,7 +239,7 @@ func printHumanResponse(command string, r response) {
 	switch command {
 	case "reload":
 		if len(r.State.Sessions) > 0 {
-			fmt.Println("Configuration reloaded. Active lock-ins unchanged.")
+			fmt.Println("Configuration reloaded. Session deadlines and break usage preserved.")
 		} else {
 			fmt.Println("Configuration reloaded.")
 		}

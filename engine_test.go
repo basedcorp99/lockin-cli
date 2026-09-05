@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 )
@@ -172,9 +173,12 @@ func TestReloadCannotReplaceOrResurrectOccurrence(t *testing.T) {
 	original := state.Sessions[0]
 	state.Config.Hosts[0] = "example.com"
 	state.Config.Schedules[0].End = "12:00"
+	tightenBlocklists(&state, state.Config)
 	Advance(&state, now.Add(time.Hour))
-	if len(state.Sessions) != 1 || !reflect.DeepEqual(state.Sessions[0], original) {
-		t.Fatal("reload modified an active snapshot")
+	if len(state.Sessions) != 1 || !state.Sessions[0].End.Equal(original.End) ||
+		!slices.Contains(state.Sessions[0].Policy.Hosts, "twitter.com") ||
+		!slices.Contains(state.Sessions[0].Policy.Hosts, "example.com") {
+		t.Fatal("reload replaced the deadline or lost old or new restrictions")
 	}
 	state.Config.Schedules = nil
 	Advance(&state, now.Add(2*time.Hour))
