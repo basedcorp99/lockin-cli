@@ -50,9 +50,11 @@ Recurring schedules: id, days [mon..sun], start/end HH:MM[:SS]. Days refer to
 start day; end <= start means overnight. One-time schedules: id, from/until
 RFC3339 timestamps. Omit enabled or use true to enable a schedule.
 Hosts are DNS names (also www), IP addresses, or CIDRs, not URLs/wildcards.
-Allowlist hosts are ALLOWED; blocklist hosts are BLOCKED. Shared IPs may affect
-other domains. DNS/DHCP and loopback remain available. This is not protection
-against an administrator, a VPN/proxy bypass, or changing the system clock.
+Blocklist domains use /etc/hosts only; explicit IPs/CIDRs use the firewall.
+Allowlists permit resolved IPs, which can also serve unrelated domains.
+Secure DNS, cached connections, direct IPs, and VPN/proxies can bypass domain blocks.
+DNS/DHCP and loopback remain available. This is not protection against an
+administrator or changing the system clock.
 `
 
 func main() {

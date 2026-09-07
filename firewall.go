@@ -31,7 +31,6 @@ type firewallPlan struct {
 }
 
 type firewallRecovery struct {
-	Cache      map[string][]string `json:"cache"`
 	AllowCache map[string][]string `json:"allow_cache"`
 	Plan       firewallPlan        `json:"plan"`
 	Hosts      []string            `json:"hosts,omitempty"`
@@ -57,9 +56,6 @@ func NewFirewall(stateDir string) (*Firewall, error) {
 		if err := json.Unmarshal(data, &f.recovery); err != nil {
 			return nil, fmt.Errorf("read firewall recovery: %w", err)
 		}
-	}
-	if f.recovery.Cache == nil {
-		f.recovery.Cache = make(map[string][]string)
 	}
 	if f.recovery.AllowCache == nil {
 		f.recovery.AllowCache = make(map[string][]string)
@@ -258,12 +254,12 @@ func (f *Firewall) resolve(policies []Policy) (firewallPlan, []string, error) {
 			for index, domain := range firewallDomains(host) {
 				if !part.Allowlist {
 					hosts = append(hosts, domain)
+					continue
 				}
 				result, seen := resolved[domain]
 				if !seen {
 					result.addresses, result.err = firewallLookup(domain)
 					resolved[domain] = result
-					f.recovery.Cache[domain] = firewallUnique(append(append([]string(nil), f.recovery.Cache[domain]...), result.addresses...))
 					if result.err == nil || errors.Is(result.err, firewallDNSMissing) {
 						f.recovery.AllowCache[domain] = result.addresses
 					}
@@ -271,11 +267,7 @@ func (f *Firewall) resolve(policies []Policy) (firewallPlan, []string, error) {
 				if result.err != nil && !(index > 0 && errors.Is(result.err, firewallDNSMissing)) {
 					failures = append(failures, result.err)
 				}
-				if part.Allowlist {
-					targets = append(targets, f.recovery.AllowCache[domain]...)
-				} else {
-					targets = append(targets, f.recovery.Cache[domain]...)
-				}
+				targets = append(targets, f.recovery.AllowCache[domain]...)
 			}
 		}
 		if part.Allowlist {
@@ -567,9 +559,9 @@ func firewallEnsureAnchor() error {
 	return errors.New("active PF main rules lack the unconditional com.apple/* anchor; refusing to replace a nonempty global filter configuration")
 }
 
-// Apply returns an error for degraded DNS even when hosts and cached-IP
-// protection are installed. A failure retains the restrictive union of the
-// previous and requested plans; it never silently acknowledges an unlock.
+// Apply reports degraded allowlist DNS or enforcement failures and retains the
+// restrictive union of previous and requested plans on failure. Successful
+// reconciliation replaces old plans, including legacy domain-derived IP blocks.
 func (f *Firewall) Apply(policies []Policy) error {
 	old := f.recovery.Plan
 	oldHosts := append([]string(nil), f.recovery.Hosts...)

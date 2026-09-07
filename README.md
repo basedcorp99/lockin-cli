@@ -173,7 +173,7 @@ An occurrence is consumed once. Reusing a completed one-time schedule's ID does 
 
 Allowlist edits and policy-mode changes apply only to future sessions. Reload first records any schedule already active under the old configuration, then evaluates the new configuration. A newly enabled schedule whose time window includes now starts immediately. Removing or editing a running schedule cannot weaken its captured restrictions or change its end time.
 
-Overlapping policies combine restrictively: blocklists form a union, and allowlists intersect. A manual break does not suspend a scheduled policy.
+Overlapping policies combine restrictively: blocklists form a union, and allowlists intersect. Emergency breaks suspend the policies of the sessions taking the break.
 
 The daemon evaluates schedules every second and on startup. Waking or booting inside a schedule activates its remaining window; a window entirely missed while powered off is not replayed. Manual session deadlines continue through sleep and power-off. Reboot recovery is implemented through persisted state and launchd; enforcement cannot run while macOS is not running.
 
@@ -239,12 +239,14 @@ The helper runs in the installed user's GUI session, never as root. Its app regi
 
 The daemon manages only its own `/etc/hosts` section and PF anchor, `com.apple/000.lockin`. It does not rewrite `/etc/pf.conf`, replace other services' anchors, or globally disable PF. If the running filter ruleset is empty, it installs the standard `com.apple/*` anchor hook using a filter-only load. A nonempty incompatible ruleset is rejected rather than overwritten.
 
-- Blocklists use hosts entries plus resolved IPv4/IPv6 destinations, including existing connections and UDP/QUIC traffic.
-- Allowlist changes may flush PF's **global connection-state table** to stop already-established unlisted connections. This can interrupt other network connections; their firewall rules are not removed.
+- Blocklist domains use only `/etc/hosts`, including their `www.` variants. They are not resolved into firewall IP blocks, so shared hosting does not cause collateral blocking of unrelated domains.
+- Explicit blocklist IPv4/IPv6 addresses and CIDRs still use PF, including eviction of existing connections and blocking UDP/QUIC traffic.
+- Allowlists still use resolved IPv4/IPv6 destinations. Allowlist changes may flush PF's **global connection-state table** to stop already-established unlisted connections. This can interrupt other network connections; their firewall rules are not removed.
 - Loopback is excluded. Allowlists permit outbound TCP/UDP destination port 53, IPv4 DHCP 68→67, DHCPv6 546→547, and ICMPv6 neighbor/router discovery types 133–136. These infrastructure exceptions can take precedence over later PF rules for those packets.
-- DNS is refreshed during reconciliation, normally every 30 seconds. Previously resolved blocked addresses are retained conservatively across DNS failures and restarts. Shared/CDN IPs can cause collateral blocking of unrelated domains.
-- DNS lookups use the default resolver in `resolv.conf`, not macOS's complete scoped/split-DNS routing. VPN and enterprise DNS setups may need explicit IP entries.
-- A degraded DNS/firewall operation is reported as an error; available restrictive rules are retained rather than silently claiming success. A failed `start` can still leave a durably recorded session: inspect `status` before retrying.
+- Allowlist DNS is refreshed during reconciliation, normally every 30 seconds, with the last successful answers retained across failures and restarts. An allowed shared/CDN IP can also permit unrelated domains. Blocklist domains do not require DNS lookups.
+- Allowlist DNS lookups use the default resolver in `resolv.conf`, not macOS's complete scoped/split-DNS routing. VPN and enterprise DNS setups may need explicit IP entries.
+- A degraded allowlist DNS or firewall operation is reported as an error; available restrictive rules are retained rather than silently claiming success. A failed `start` can still leave a durably recorded session: inspect `status` before retrying.
+- Domain blocks depend on applications honoring `/etc/hosts`. Browser secure DNS, cached DNS or existing connections, direct IP access, and VPN/proxies can bypass them. Wildcard subdomains are not supported; list each required subdomain explicitly.
 
 This is a focus tool, **not a security boundary against an administrator**. Root can change firewall rules, state, the clock, or the daemon. Forward clock changes can expire sessions. Proxies, VPN encapsulation, DNS tunnels, alternate addresses, and unlisted subdomains can bypass destination-based filtering. No claim of universal website blocking or privileged-tamper resistance is made.
 
@@ -273,6 +275,8 @@ launchctl print system/local.lockin.daemon
 ```
 
 For an upgrade, pull the new source and rerun `./install.sh`. Installation replaces the executables and restarts launchd while preserving active sessions. The script then reloads the supplied configuration, applying additional blocks to running blocklist sessions and updating future-session configuration and alert settings. Reinstalling cannot reset a session. Notification permission is still requested only by `lockin alerts authorize`.
+
+Upgrading from domain-IP blocking removes the old domain-derived PF blocks on the first successful reconciliation, including for running sessions. Domain hosts entries and explicit IP/CIDR blocks remain enforced; session deadlines and emergency-break usage are unchanged.
 
 ## Development
 

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -54,6 +56,66 @@ func TestFirewallDisjointAllowlistsDenyEverything(t *testing.T) {
 	}
 	if firewallPermits(plan, "192.0.2.1") || firewallPermits(plan, "198.51.100.1") {
 		t.Fatal("disjoint allowlists permitted a member of only one policy")
+	}
+}
+
+func TestDomainBlockUpgradePreservesExplicitNetworkBlocks(t *testing.T) {
+	dir := t.TempDir()
+	// An older installation retained a shared address resolved for a domain.
+	legacy := `{"cache":{"blocked.invalid":["192.0.2.7/32"]},"plan":{"blocked":["192.0.2.7/32","198.51.100.0/24"]},"hosts":["blocked.invalid"]}`
+	if err := os.WriteFile(filepath.Join(dir, "firewall.json"), []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := NewFirewall(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, domains, err := fw.resolve([]Policy{{Mode: "blocklist", Hosts: []string{
+		"blocked.invalid", "198.51.100.0/24", "2001:db8::7",
+	}}})
+	if err != nil {
+		t.Fatalf("domain blocking must not depend on working DNS: %v", err)
+	}
+	if !firewallPermits(plan, "192.0.2.7") {
+		t.Fatal("upgrade retained a domain-derived block on a shared address")
+	}
+	if firewallPermits(plan, "198.51.100.42") || firewallPermits(plan, "2001:db8::7") {
+		t.Fatal("domain cutover removed an explicit IP or CIDR block")
+	}
+	if !firewallPermits(plan, "2001:db8::8") {
+		t.Fatal("explicit address block affected an unrelated address")
+	}
+	hosts, err := firewallHosts(nil, domains)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mapping := range []string{
+		"0.0.0.0 blocked.invalid\n", ":: blocked.invalid\n",
+		"0.0.0.0 www.blocked.invalid\n", ":: www.blocked.invalid\n",
+	} {
+		if !bytes.Contains(hosts, []byte(mapping)) {
+			t.Fatalf("domain no longer blocked in hosts: missing %q", mapping)
+		}
+	}
+}
+
+func TestDomainBlockDoesNotDenySharedAllowlistedAddress(t *testing.T) {
+	fw, err := NewFirewall(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, _, err := fw.resolve([]Policy{
+		{Mode: "blocklist", Hosts: []string{"blocked.invalid", "192.0.2.9"}},
+		{Mode: "allowlist", Hosts: []string{"192.0.2.0/24"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !firewallPermits(plan, "192.0.2.7") {
+		t.Fatal("domain block overrode an allowed network destination")
+	}
+	if firewallPermits(plan, "192.0.2.9") || firewallPermits(plan, "198.51.100.7") {
+		t.Fatal("explicit denial or allowlist enforcement was lost")
 	}
 }
 
