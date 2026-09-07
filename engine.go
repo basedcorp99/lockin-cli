@@ -212,6 +212,8 @@ func StartManual(state *State, now time.Time, duration time.Duration) error {
 	if err := ValidateConfig(state.Config); err != nil {
 		return err
 	}
+	// Durable deadlines must include sleep, even when the monotonic clock pauses.
+	now = now.Round(0)
 	Advance(state, now)
 	for _, session := range state.Sessions {
 		if session.Kind == "manual" && now.Before(session.End) {
@@ -230,6 +232,8 @@ func StartManual(state *State, now time.Time, duration time.Duration) error {
 }
 
 func TakeBreak(state *State, now time.Time) error {
+	// Break deadlines follow wall time too, just like persisted session deadlines.
+	now = now.Round(0)
 	Advance(state, now)
 	if len(state.Sessions) == 0 {
 		return fmt.Errorf("no active session")

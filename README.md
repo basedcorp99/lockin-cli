@@ -175,7 +175,7 @@ Allowlist edits and policy-mode changes apply only to future sessions. Reload fi
 
 Overlapping policies combine restrictively: blocklists form a union, and allowlists intersect. Emergency breaks suspend the policies of the sessions taking the break.
 
-The daemon evaluates schedules every second and on startup. Waking or booting inside a schedule activates its remaining window; a window entirely missed while powered off is not replayed. Manual session deadlines continue through sleep and power-off. Reboot recovery is implemented through persisted state and launchd; enforcement cannot run while macOS is not running.
+The daemon evaluates schedules every second and on startup. Waking or booting inside a schedule activates its remaining window; a window entirely missed while powered off is not replayed. Session and emergency-break deadlines use wall-clock time, not awake-only elapsed time: sleep counts toward both, and expired restrictions are reconciled after wake. Reboot recovery is implemented through persisted state and launchd; enforcement cannot run while macOS is not running.
 
 ## Connection-based alerts
 
