@@ -5,8 +5,8 @@ A macOS focus blocker written in Go. One JSON configuration, one CLI, and a root
 - Manual sessions with durations such as `30s`, `90m`, or `1h30m`.
 - Blocklist or allowlist policies for DNS names, IPv4/IPv6 addresses, and CIDRs.
 - Optional weekly or one-time schedules, including overnight windows.
-- One emergency break per **manual** session, lasting at most **three minutes**.
-- **No emergency break for scheduled sessions.** No stop, shorten, or reset command.
+- One emergency break per manual session or scheduled occurrence, lasting at most **three minutes**.
+- No stop, shorten, or reset command.
 - Active restrictions, deadlines, and break usage survive daemon restarts and reboots. Configuration reloads cannot loosen a running session.
 - Optional connection-based reminders while unlocked, with a native **Start lock-in** notification action.
 
@@ -60,7 +60,7 @@ lockin reload
 | Command | Effect |
 | --- | --- |
 | `lockin start 1h30m` | Start one manual session using the accepted configuration. |
-| `lockin break` | Consume that manual session's only emergency break. |
+| `lockin break` | Consume the only emergency break of every active manual or scheduled session. |
 | `lockin status` | Show active sessions, deadlines, break allowance, and enforcement errors. |
 | `lockin status --json` | Return structured state and enforcement health. Exits nonzero on an error. |
 | `lockin check [--config PATH]` | Validate a configuration without changing daemon state. |
@@ -78,11 +78,11 @@ Only one manual session can be active at once. A second `start` cannot replace, 
 
 ### Emergency break
 
-- Exactly one use per manual session, not a daily quota.
-- Lasts three minutes, or until the session's end if sooner.
-- The session timer continues during the break.
-- A schedule starting during a break immediately ends the break, with no refund.
-- A break cannot start while any scheduled session is active.
+- Exactly one use per manual session or scheduled occurrence, not a daily quota. Each new recurring occurrence gets its own allowance.
+- Lasts three minutes, or until each session's end if sooner.
+- Session timers continue during the break.
+- Overlapping sessions pause together. Every active session must have an unused break; otherwise the request is rejected without consuming any other allowance.
+- A new session starting during a break enforces its own restrictions. It does not cancel, extend, or refund existing breaks.
 - Reloading or restarting does not restore a consumed use.
 
 ## Configuration

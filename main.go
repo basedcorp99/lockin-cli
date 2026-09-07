@@ -21,7 +21,7 @@ const label = "local.lockin.daemon"
 const help = `lockin — CLI-only macOS focus sessions
 
   lockin start 90m           Start a manual session (also 30s, 1h30m, 2h)
-  lockin break               Use the session's only emergency break, up to 3m
+  lockin break               Use active sessions' emergency breaks, up to 3m
   lockin status [--json]     Show active sessions and enforcement health
   lockin reload [--config PATH]
                             Validate and accept configuration without restarting
@@ -38,7 +38,9 @@ const help = `lockin — CLI-only macOS focus sessions
 Default configuration: ~/.config/lockin/config.json
 Duration: positive, at least one second; explicit units required.
 There is deliberately no stop, shorten, or reset command.
-Scheduled sessions cannot take a break. A schedule interrupts a manual break.
+Manual and scheduled sessions each get one break per session/occurrence.
+Overlapping sessions pause together only if every session has an unused break.
+New sessions still enforce their own restrictions during an existing break.
 Reload adds blocks to running blocklist sessions; existing blocks stay until expiry.
 Allowlist/mode changes affect future sessions. Deadlines and break usage are retained.
 Sessions survive daemon restarts and reboot. Schedules catch up after sleep.
@@ -253,7 +255,10 @@ func printHumanResponse(command string, r response) {
 		}
 	case "break":
 		for _, session := range r.State.Sessions {
-			if session.Kind == "manual" && r.Now.Before(session.BreakUntil) {
+			if r.Now.Before(session.BreakUntil) {
+				if len(r.State.Sessions) > 1 {
+					fmt.Printf("%s: ", session.ID)
+				}
 				if session.BreakUntil.Equal(session.End) {
 					fmt.Printf("Emergency break for the final %s. Session ends at %s.\n",
 						shortDuration(session.End.Sub(r.Now)), localDeadline(session.End, r.Now))
@@ -261,7 +266,6 @@ func printHumanResponse(command string, r response) {
 					fmt.Printf("Emergency break for %s. Resumes at %s.\n",
 						shortDuration(session.BreakUntil.Sub(r.Now)), localDeadline(session.BreakUntil, r.Now))
 				}
-				return
 			}
 		}
 	case "status":
@@ -269,7 +273,6 @@ func printHumanResponse(command string, r response) {
 			fmt.Println("No active lock-in.")
 			return
 		}
-		scheduled := hasActiveSchedule(r.State, r.Now)
 		for _, session := range r.State.Sessions {
 			title := "Lock-in"
 			if session.Kind == "schedule" {
@@ -277,9 +280,6 @@ func printHumanResponse(command string, r response) {
 			}
 			fmt.Printf("%s: %s remaining (ends %s).\n",
 				title, shortDuration(session.End.Sub(r.Now)), localDeadline(session.End, r.Now))
-			if session.Kind != "manual" {
-				continue
-			}
 			switch {
 			case r.Now.Before(session.BreakUntil):
 				if session.BreakUntil.Equal(session.End) {
@@ -290,12 +290,9 @@ func printHumanResponse(command string, r response) {
 				}
 			case session.BreakUsed:
 				fmt.Println("Emergency break used.")
-			case !scheduled:
-				fmt.Println("One 3-minute emergency break available.")
+			default:
+				fmt.Println("One 3-minute emergency break unused (lockin break requires all active sessions to have an unused break).")
 			}
-		}
-		if scheduled {
-			fmt.Println("Emergency breaks are unavailable while a scheduled lock-in is active.")
 		}
 	}
 }

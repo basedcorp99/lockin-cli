@@ -111,14 +111,6 @@ func Advance(state *State, now time.Time) bool {
 		}
 	}
 
-	if hasActiveSchedule(*state, now) {
-		for i := range state.Sessions {
-			if state.Sessions[i].Kind == "manual" && !state.Sessions[i].BreakUntil.IsZero() {
-				state.Sessions[i].BreakUntil = time.Time{}
-				changed = true
-			}
-		}
-	}
 	return changed
 }
 
@@ -213,17 +205,6 @@ func tightenBlocklists(state *State, cfg Config) {
 	}
 }
 
-// Persisted sessions have already started; a backwards clock change must not
-// temporarily disable them simply because now is earlier than their Start.
-func hasActiveSchedule(state State, now time.Time) bool {
-	for _, session := range state.Sessions {
-		if session.Kind == "schedule" && now.Before(session.End) {
-			return true
-		}
-	}
-	return false
-}
-
 func StartManual(state *State, now time.Time, duration time.Duration) error {
 	if duration < time.Second {
 		return fmt.Errorf("duration must be at least 1s")
@@ -250,37 +231,33 @@ func StartManual(state *State, now time.Time, duration time.Duration) error {
 
 func TakeBreak(state *State, now time.Time) error {
 	Advance(state, now)
-	if hasActiveSchedule(*state, now) {
-		return fmt.Errorf("emergency breaks are unavailable while a scheduled session is active")
+	if len(state.Sessions) == 0 {
+		return fmt.Errorf("no active session")
+	}
+	// Validate every allowance before consuming any overlapping session's break.
+	for _, session := range state.Sessions {
+		if session.BreakUsed {
+			return fmt.Errorf("session %s has already used its emergency break", session.ID)
+		}
 	}
 	for i := range state.Sessions {
 		session := &state.Sessions[i]
-		if session.Kind != "manual" || !now.Before(session.End) {
-			continue
-		}
-		if session.BreakUsed {
-			return fmt.Errorf("this manual session has already used its emergency break")
-		}
 		session.BreakUsed = true
 		session.BreakUntil = now.Add(3 * time.Minute)
 		if session.BreakUntil.After(session.End) {
 			session.BreakUntil = session.End
 		}
-		return nil
 	}
-	return fmt.Errorf("no active manual session")
+	return nil
 }
 
 // ActivePolicies preserves separate snapshots so the firewall can combine them
-// restrictively. A schedule overrides a break even before Advance clears it.
+// restrictively, excluding sessions currently on an emergency break.
 func ActivePolicies(state State, now time.Time) []Policy {
 	var policies []Policy
-	scheduled := hasActiveSchedule(state, now)
 	for _, session := range state.Sessions {
-		if !now.Before(session.End) {
-			continue
-		}
-		if session.Kind == "manual" && !scheduled && now.Before(session.BreakUntil) {
+		// Persisted sessions have already started, even after a clock rollback.
+		if !now.Before(session.End) || now.Before(session.BreakUntil) {
 			continue
 		}
 		policies = append(policies, session.Policy)

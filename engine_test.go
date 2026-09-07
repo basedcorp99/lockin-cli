@@ -259,7 +259,7 @@ func TestManualBreakConsumptionSurvivesRestart(t *testing.T) {
 	}
 }
 
-func TestScheduleCancelsBreakWithoutRefund(t *testing.T) {
+func TestNewScheduleEnforcesDuringExistingBreak(t *testing.T) {
 	state := State{Config: testConfig(Schedule{ID: "work", From: "2026-09-07T08:02:00Z", Until: "2026-09-07T08:03:00Z"})}
 	now := instant(t, "2026-09-07T08:00:00Z")
 	if err := StartManual(&state, now, time.Hour); err != nil {
@@ -269,34 +269,95 @@ func TestScheduleCancelsBreakWithoutRefund(t *testing.T) {
 		t.Fatal(err)
 	}
 	Advance(&state, now.Add(2*time.Minute))
-	if len(ActivePolicies(state, now.Add(2*time.Minute))) != 2 {
-		t.Fatal("new schedule failed to restore both policies immediately")
+	if len(ActivePolicies(state, now.Add(2*time.Minute))) != 1 {
+		t.Fatal("new schedule must enforce its own policy during an existing break")
 	}
 	if err := TakeBreak(&state, now.Add(2*time.Minute)); err == nil {
-		t.Fatal("break bypassed active schedule")
+		t.Fatal("overlap allowed reusing the manual break")
 	}
 	Advance(&state, now.Add(3*time.Minute))
-	if len(ActivePolicies(state, now.Add(3*time.Minute))) != 1 {
-		t.Fatal("cancelled break resumed after schedule ended")
+	if len(ActivePolicies(state, now.Add(3*time.Minute))) != 0 {
+		t.Fatal("new schedule changed the existing break's deadline")
 	}
-	if err := TakeBreak(&state, now.Add(3*time.Minute)); err == nil {
-		t.Fatal("cancelled break was refunded")
+	Advance(&state, now.Add(4*time.Minute))
+	if len(ActivePolicies(state, now.Add(4*time.Minute))) != 1 {
+		t.Fatal("manual restrictions did not resume at the original break deadline")
 	}
 }
 
-func TestScheduleBlocksUnusedBreakAndClockRollback(t *testing.T) {
+func TestOverlappingBreaksAndClockRollback(t *testing.T) {
 	state := State{Config: testConfig(Schedule{ID: "work", From: "2026-09-07T08:00:00Z", Until: "2026-09-07T08:02:00Z"})}
 	now := instant(t, "2026-09-07T08:00:00Z")
 	if err := StartManual(&state, now, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if err := TakeBreak(&state, now); err == nil {
-		t.Fatal("unused break bypassed schedule")
-	}
 	if len(ActivePolicies(state, now.Add(-time.Hour))) != 2 {
 		t.Fatal("backwards clock adjustment temporarily unlocked started sessions")
 	}
+	if err := TakeBreak(&state, now); err != nil {
+		t.Fatal(err)
+	}
+	Advance(&state, now.Add(time.Minute))
+	if len(ActivePolicies(state, now.Add(time.Minute))) != 0 {
+		t.Fatal("overlapping sessions did not pause together")
+	}
+	Advance(&state, now.Add(2*time.Minute))
+	if len(state.Sessions) != 1 || len(ActivePolicies(state, now.Add(2*time.Minute))) != 0 {
+		t.Fatal("short schedule expiry changed the manual break")
+	}
+	if err := TakeBreak(&state, now.Add(3*time.Minute)); err == nil {
+		t.Fatal("overlapping break did not consume the manual allowance")
+	}
+}
+
+func TestScheduledBreakSurvivesRestartAndResetsNextOccurrence(t *testing.T) {
+	now := instant(t, "2026-09-07T08:00:00Z")
+	state := State{Config: testConfig(Schedule{ID: "work", Days: []string{"mon"}, Start: "09:00", End: "17:00"})}
+	if err := TakeBreak(&state, now); err != nil {
+		t.Fatal(err)
+	}
+	state = restartState(t, state)
+	Advance(&state, now.Add(time.Minute))
+	if len(ActivePolicies(state, now.Add(time.Minute))) != 0 {
+		t.Fatal("scheduled break did not survive restart and reconciliation")
+	}
+	if err := TakeBreak(&state, now.Add(time.Minute)); err == nil {
+		t.Fatal("repeated request extended an active break")
+	}
+	Advance(&state, now.Add(3*time.Minute))
+	if len(ActivePolicies(state, now.Add(3*time.Minute))) != 1 {
+		t.Fatal("scheduled restrictions did not resume at three minutes")
+	}
+	if err := TakeBreak(&state, now.Add(4*time.Minute)); err == nil {
+		t.Fatal("restart restored a consumed scheduled break")
+	}
+	Advance(&state, instant(t, "2026-09-07T15:00:00Z"))
+	if len(state.Sessions) != 0 {
+		t.Fatal("break extended the scheduled session deadline")
+	}
+	if err := TakeBreak(&state, now.AddDate(0, 0, 7)); err != nil {
+		t.Fatalf("new weekly occurrence did not receive its own break: %v", err)
+	}
+}
+
+func TestBreakRejectionDoesNotConsumeOtherSessions(t *testing.T) {
+	now := instant(t, "2026-09-07T08:00:00Z")
+	state := State{Config: testConfig(
+		Schedule{ID: "long", From: "2026-09-07T08:00:00Z", Until: "2026-09-07T09:00:00Z"},
+		Schedule{ID: "short", From: "2026-09-07T08:00:00Z", Until: "2026-09-07T08:02:00Z"},
+	)}
+	Advance(&state, now)
+	state.Sessions[1].BreakUsed = true
+	if err := TakeBreak(&state, now); err == nil {
+		t.Fatal("break accepted despite an exhausted overlapping session")
+	}
+	if len(ActivePolicies(state, now)) != 2 {
+		t.Fatal("rejected break partially unlocked")
+	}
 	if err := TakeBreak(&state, now.Add(2*time.Minute)); err != nil {
-		t.Fatalf("rejected scheduled break must not consume manual allowance: %v", err)
+		t.Fatalf("rejected break consumed another session's allowance: %v", err)
+	}
+	if len(ActivePolicies(state, now.Add(2*time.Minute))) != 0 {
+		t.Fatal("remaining scheduled session did not pause")
 	}
 }

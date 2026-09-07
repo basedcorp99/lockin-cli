@@ -51,6 +51,50 @@ func TestFailedBreakPersistenceCannotUnlock(t *testing.T) {
 	}
 }
 
+func TestScheduledBreakReloadAndRestart(t *testing.T) {
+	now := instant(t, "2026-09-07T08:00:00Z")
+	cfg := testConfig(Schedule{ID: "work", From: "2026-09-07T07:00:00Z", Until: "2026-09-07T09:00:00Z"})
+	path := filepath.Join(t.TempDir(), "state.json")
+	fw := &observedEnforcement{}
+	svc := service{
+		state: State{Config: cfg}, firewall: fw,
+		persist: func(s State) error { return saveJSON(path, s) },
+	}
+	if result := svc.handle(request{Command: "break"}, now); result.Error != "" {
+		t.Fatal(result.Error)
+	}
+	if len(fw.policies) != 0 {
+		t.Fatal("daemon did not release scheduled restrictions")
+	}
+	cfg.Hosts = []string{"example.com"}
+	if result := svc.handle(request{Command: "reload", Config: &cfg}, now.Add(time.Minute)); result.Error != "" {
+		t.Fatal(result.Error)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := decodeStrict(data, &svc.state); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.reconcile(now.Add(2*time.Minute), true); err != nil {
+		t.Fatal(err)
+	}
+	if len(fw.policies) != 0 {
+		t.Fatal("reload or restart cancelled the scheduled break")
+	}
+	if err := svc.reconcile(now.Add(3*time.Minute), true); err != nil {
+		t.Fatal(err)
+	}
+	if len(fw.policies) != 1 || !slices.Contains(fw.policies[0].Hosts, "twitter.com") ||
+		!slices.Contains(fw.policies[0].Hosts, "example.com") {
+		t.Fatal("scheduled restrictions did not resume with old and new blocks")
+	}
+	if result := svc.handle(request{Command: "break"}, now.Add(4*time.Minute)); result.Error == "" {
+		t.Fatal("reload or restart restored the scheduled allowance")
+	}
+}
+
 func TestFailedEnforcementRetainsSessionAcrossRecovery(t *testing.T) {
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	state := State{Config: Config{Mode: "blocklist", Hosts: []string{"example.com"}, Timezone: "UTC"}}
