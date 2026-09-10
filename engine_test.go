@@ -52,6 +52,13 @@ func TestConfigStrictnessAndHostNormalization(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Hosts, want) {
 		t.Fatalf("hosts = %v, want %v", cfg.Hosts, want)
 	}
+	pfConfig, err := ParseConfig([]byte(`{"mode":"blocklist","hosts":["youtube.com"],"domain_pf":{"enabled":true,"exclude":["TWITTER.COM.","twitter.com"]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (&DomainPFConfig{Enabled: true, Exclude: []string{"twitter.com"}}); !reflect.DeepEqual(pfConfig.DomainPF, want) {
+		t.Fatalf("domain_pf = %+v, want %+v", pfConfig.DomainPF, want)
+	}
 	invalid := []string{
 		`{"mode":"blocklist","hosts":["twitter.com"],"unknown":true}`,
 		`{"mode":"blocklist","hosts":["twitter.com"]} {}`,
@@ -69,6 +76,10 @@ func TestConfigStrictnessAndHostNormalization(t *testing.T) {
 		`{"mode":"allowlist","schedules":[{"id":"x","days":["mon"],"start":"09:00","end":"17:00","from":"2026-09-07T09:00:00Z","until":"2026-09-07T17:00:00Z"}]}`,
 		`{"mode":"allowlist","schedules":[{"id":"x","days":["mon"],"start":"09:00","end":"17:00","typo":true}]}`,
 		`{"mode":"allowlist","schedules":[{"id":"x","days":["mon"],"start":"09:00","end":"17:00"},{"id":"x","days":["tue"],"start":"09:00","end":"17:00"}]}`,
+		`{"mode":"allowlist","hosts":[],"domain_pf":{"enabled":true}}`,
+		`{"mode":"blocklist","hosts":["example.com"],"domain_pf":{"enabled":true,"exclude":["192.0.2.1"]}}`,
+		`{"mode":"blocklist","hosts":["example.com"],"domain_pf":{"enabled":true,"exclude":["*.example.com"]}}`,
+		`{"mode":"blocklist","hosts":["example.com"],"domain_pf":{"enabled":true,"typo":[]}}`,
 	}
 	for _, input := range invalid {
 		if _, err := ParseConfig([]byte(input)); err == nil {

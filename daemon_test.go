@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -190,6 +191,7 @@ func TestReloadTightensActiveBlocklistDurablyWithoutResettingBreak(t *testing.T)
 	original := state.Sessions[0]
 	cfg := state.Config
 	cfg.Hosts = []string{"example.net"}
+	cfg.DomainPF = &DomainPFConfig{Enabled: true, Exclude: []string{"example.com"}}
 	// An older daemon may already have accepted these hosts without applying
 	// them to the captured session. Reload must not depend on a config diff.
 	state.Config = cfg
@@ -217,6 +219,9 @@ func TestReloadTightensActiveBlocklistDurablyWithoutResettingBreak(t *testing.T)
 	if len(active) != 1 || !slices.Contains(active[0].Hosts, "example.com") || !slices.Contains(active[0].Hosts, "example.net") {
 		t.Fatalf("resumed session did not preserve old and new blocks after restart: %+v", active)
 	}
+	if !reflect.DeepEqual(active[0].DomainPF, cfg.DomainPF) {
+		t.Fatalf("reload did not apply domain PF enforcement to the active session: %+v", active[0].DomainPF)
+	}
 	got := restored.Sessions[0]
 	if got.ID != original.ID || !got.Start.Equal(original.Start) || !got.End.Equal(original.End) ||
 		got.BreakUsed != original.BreakUsed || !got.BreakUntil.Equal(original.BreakUntil) {
@@ -224,12 +229,16 @@ func TestReloadTightensActiveBlocklistDurablyWithoutResettingBreak(t *testing.T)
 	}
 	svc.state = restored
 	cfg.Hosts = []string{"example.com"}
+	cfg.DomainPF = nil
 	if result := svc.handle(request{Command: "reload", Config: &cfg}, original.BreakUntil); result.Error != "" {
 		t.Fatal(result.Error)
 	}
 	active = ActivePolicies(svc.state, original.BreakUntil)
 	if len(active) != 1 || !slices.Contains(active[0].Hosts, "example.net") {
 		t.Fatal("removing a newly added block loosened the running session")
+	}
+	if active[0].DomainPF != nil {
+		t.Fatal("domain PF enforcement did not follow the latest configuration")
 	}
 	if err := TakeBreak(&svc.state, original.BreakUntil); err == nil {
 		t.Fatal("reload restored a consumed emergency break")
@@ -248,13 +257,14 @@ func TestFailedReloadDoesNotChangeAcceptedRestrictions(t *testing.T) {
 	}
 	cfg := state.Config
 	cfg.Hosts = []string{"example.net"}
+	cfg.DomainPF = &DomainPFConfig{Enabled: true}
 	result := svc.handle(request{Command: "reload", Config: &cfg}, now.Add(time.Second))
 	if result.Error == "" {
 		t.Fatal("reload succeeded without durable state")
 	}
 	active := ActivePolicies(svc.state, now.Add(time.Second))
 	if len(active) != 1 || !slices.Equal(active[0].Hosts, []string{"example.com"}) ||
-		!slices.Equal(svc.state.Config.Hosts, []string{"example.com"}) {
+		active[0].DomainPF != nil || !slices.Equal(svc.state.Config.Hosts, []string{"example.com"}) {
 		t.Fatal("failed reload changed accepted restrictions")
 	}
 }

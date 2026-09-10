@@ -226,7 +226,7 @@ func runDaemon() error {
 		if !session.End.After(session.Start) {
 			return errors.New("invalid persisted session interval")
 		}
-		if err = ValidateConfig(Config{Mode: session.Policy.Mode, Hosts: session.Policy.Hosts}); err != nil {
+		if err = ValidateConfig(Config{Mode: session.Policy.Mode, Hosts: session.Policy.Hosts, DomainPF: session.Policy.DomainPF}); err != nil {
 			return fmt.Errorf("invalid persisted policy: %w", err)
 		}
 	}

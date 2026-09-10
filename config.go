@@ -13,17 +13,24 @@ import (
 	"time"
 )
 
+type DomainPFConfig struct {
+	Enabled bool     `json:"enabled"`
+	Exclude []string `json:"exclude,omitempty"`
+}
+
 type Policy struct {
-	Mode  string   `json:"mode"`
-	Hosts []string `json:"hosts"`
+	Mode     string          `json:"mode"`
+	Hosts    []string        `json:"hosts"`
+	DomainPF *DomainPFConfig `json:"domain_pf,omitempty"`
 }
 
 type Config struct {
-	Mode      string       `json:"mode"`
-	Hosts     []string     `json:"hosts"`
-	Timezone  string       `json:"timezone,omitempty"`
-	Schedules []Schedule   `json:"schedules,omitempty"`
-	Alerts    *AlertConfig `json:"alerts,omitempty"`
+	Mode      string          `json:"mode"`
+	Hosts     []string        `json:"hosts"`
+	DomainPF  *DomainPFConfig `json:"domain_pf,omitempty"`
+	Timezone  string          `json:"timezone,omitempty"`
+	Schedules []Schedule      `json:"schedules,omitempty"`
+	Alerts    *AlertConfig    `json:"alerts,omitempty"`
 }
 
 // Days name the day a recurring window starts. End <= Start ends the next day.
@@ -73,6 +80,19 @@ func ParseConfig(data []byte) (Config, error) {
 		}
 	}
 	cfg.Hosts = hosts
+	if cfg.DomainPF != nil {
+		domainPF := *cfg.DomainPF
+		domainPF.Exclude = domainPF.Exclude[:0]
+		seen = make(map[string]bool, len(cfg.DomainPF.Exclude))
+		for _, host := range cfg.DomainPF.Exclude {
+			normalized, _ := normalizeHost(host)
+			if !seen[normalized] {
+				domainPF.Exclude = append(domainPF.Exclude, normalized)
+				seen[normalized] = true
+			}
+		}
+		cfg.DomainPF = &domainPF
+	}
 	return cfg, nil
 }
 
@@ -86,6 +106,20 @@ func ValidateConfig(cfg Config) error {
 	for i, host := range cfg.Hosts {
 		if _, err := normalizeHost(host); err != nil {
 			return fmt.Errorf("hosts[%d]: %w", i, err)
+		}
+	}
+	if cfg.DomainPF != nil {
+		if cfg.Mode != "blocklist" {
+			return fmt.Errorf("domain_pf is available only in blocklist mode")
+		}
+		for i, host := range cfg.DomainPF.Exclude {
+			normalized, err := normalizeHost(host)
+			if err != nil {
+				return fmt.Errorf("domain_pf.exclude[%d]: %w", i, err)
+			}
+			if _, err := firewallPrefix(normalized); err == nil {
+				return fmt.Errorf("domain_pf.exclude[%d]: %q is not a DNS name", i, host)
+			}
 		}
 	}
 	if _, err := configLocation(cfg); err != nil {

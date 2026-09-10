@@ -50,9 +50,10 @@ Recurring schedules: id, days [mon..sun], start/end HH:MM[:SS]. Days refer to
 start day; end <= start means overnight. One-time schedules: id, from/until
 RFC3339 timestamps. Omit enabled or use true to enable a schedule.
 Hosts are DNS names (also www), IP addresses, or CIDRs, not URLs/wildcards.
-Blocklist domains use /etc/hosts only; explicit IPs/CIDRs use the firewall.
-Allowlists permit resolved IPs, which can also serve unrelated domains.
-Secure DNS, cached connections, direct IPs, and VPN/proxies can bypass domain blocks.
+Blocklist domains always use /etc/hosts; domain_pf can also resolve selected
+domains into firewall blocks. Explicit IPs/CIDRs always use the firewall.
+Shared addresses, secure DNS, cached connections, VPNs, and proxies can bypass
+or broaden destination-based blocking; see the README for exact tradeoffs.
 DNS/DHCP and loopback remain available. This is not protection against an
 administrator or changing the system clock.
 `

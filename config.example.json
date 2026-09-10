@@ -3,6 +3,10 @@
   "hosts": [
     "example.com"
   ],
+  "domain_pf": {
+    "enabled": false,
+    "exclude": []
+  },
   "timezone": "Local",
   "alerts": {
     "enabled": false,

@@ -32,6 +32,7 @@ type firewallPlan struct {
 
 type firewallRecovery struct {
 	AllowCache map[string][]string `json:"allow_cache"`
+	BlockCache map[string][]string `json:"block_cache,omitempty"`
 	Plan       firewallPlan        `json:"plan"`
 	Hosts      []string            `json:"hosts,omitempty"`
 	Token      string              `json:"token,omitempty"`
@@ -44,10 +45,11 @@ type firewallRecovery struct {
 type Firewall struct {
 	dir      string
 	recovery firewallRecovery
+	lookup   func(string) ([]string, error)
 }
 
 func NewFirewall(stateDir string) (*Firewall, error) {
-	f := &Firewall{dir: stateDir}
+	f := &Firewall{dir: stateDir, lookup: firewallLookup}
 	data, err := os.ReadFile(filepath.Join(stateDir, "firewall.json"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -59,6 +61,9 @@ func NewFirewall(stateDir string) (*Firewall, error) {
 	}
 	if f.recovery.AllowCache == nil {
 		f.recovery.AllowCache = make(map[string][]string)
+	}
+	if f.recovery.BlockCache == nil {
+		f.recovery.BlockCache = make(map[string][]string)
 	}
 	return f, nil
 }
@@ -245,6 +250,14 @@ func (f *Firewall) resolve(policies []Policy) (firewallPlan, []string, error) {
 		if policy.Mode != "blocklist" && !part.Allowlist {
 			return plan, hosts, fmt.Errorf("invalid firewall policy mode %q", policy.Mode)
 		}
+		excluded := make(map[string]bool)
+		if policy.DomainPF != nil {
+			for _, host := range policy.DomainPF.Exclude {
+				for _, domain := range firewallDomains(host) {
+					excluded[domain] = true
+				}
+			}
+		}
 		var targets []string
 		for _, host := range policy.Hosts {
 			if p, err := firewallPrefix(host); err == nil {
@@ -254,20 +267,26 @@ func (f *Firewall) resolve(policies []Policy) (firewallPlan, []string, error) {
 			for index, domain := range firewallDomains(host) {
 				if !part.Allowlist {
 					hosts = append(hosts, domain)
-					continue
+					if policy.DomainPF == nil || !policy.DomainPF.Enabled || excluded[domain] {
+						continue
+					}
 				}
 				result, seen := resolved[domain]
 				if !seen {
-					result.addresses, result.err = firewallLookup(domain)
+					result.addresses, result.err = f.lookup(domain)
 					resolved[domain] = result
-					if result.err == nil || errors.Is(result.err, firewallDNSMissing) {
-						f.recovery.AllowCache[domain] = result.addresses
-					}
+				}
+				cache := f.recovery.AllowCache
+				if !part.Allowlist {
+					cache = f.recovery.BlockCache
+				}
+				if result.err == nil || errors.Is(result.err, firewallDNSMissing) {
+					cache[domain] = result.addresses
 				}
 				if result.err != nil && !(index > 0 && errors.Is(result.err, firewallDNSMissing)) {
 					failures = append(failures, result.err)
 				}
-				targets = append(targets, f.recovery.AllowCache[domain]...)
+				targets = append(targets, cache[domain]...)
 			}
 		}
 		if part.Allowlist {

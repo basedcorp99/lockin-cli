@@ -92,7 +92,11 @@ Start with [`config.example.json`](config.example.json). Unknown fields, malform
 ```json
 {
   "mode": "blocklist",
-  "hosts": ["example.com", "203.0.113.0/24", "2001:db8::/32"],
+  "hosts": ["example.com", "shared.example", "203.0.113.0/24", "2001:db8::/32"],
+  "domain_pf": {
+    "enabled": true,
+    "exclude": ["shared.example"]
+  },
   "timezone": "Europe/London",
   "schedules": [
     {
@@ -116,6 +120,7 @@ Start with [`config.example.json`](config.example.json). Unknown fields, malform
 | --- | --- |
 | `mode` | Required: `blocklist` blocks listed destinations; `allowlist` permits only listed destinations, plus network infrastructure exceptions below. |
 | `hosts` | DNS names, IP addresses, or CIDRs. A blocklist must not be empty. An empty allowlist blocks all non-exempt outbound destinations. |
+| `domain_pf` | Optional blocklist-only object. `enabled: true` also resolves domains into PF blocks; `exclude` leaves named domains on `/etc/hosts`-only enforcement. Omitted or disabled preserves hosts-only behavior. |
 | `timezone` | Optional IANA timezone, such as `Europe/Rome` or `America/New_York`. Omitted or `Local` uses the machine's local timezone at daemon startup. Use an explicit timezone for predictable travel behavior. |
 | `schedules` | Optional array. Omit or use `[]` for manual sessions only. |
 | `alerts` | Optional reminder settings. Absent or `enabled: false` means no connection sampling or reminders. |
@@ -169,7 +174,7 @@ An occurrence is consumed once. Reusing a completed one-time schedule's ID does 
 
 ### Reload, overlap, and sleep
 
-`reload` immediately adds configured blocked hosts to every running **blocklist** session. Removing a host from the configuration cannot remove it from a running session, including a block added by an earlier reload. The additions are saved durably before firewall enforcement and survive restarts. Reloading preserves session deadlines and emergency-break usage; an in-progress break continues normally, with the added blocks enforced when it ends.
+`reload` immediately adds configured blocked hosts to every running **blocklist** session. Removing a host from the configuration cannot remove it from a running session, including a block added by an earlier reload. The additions are saved durably before firewall enforcement and survive restarts. `domain_pf` is an enforcement choice rather than session membership, so reload applies its current enabled state and exclusions to running blocklist sessions without changing their captured hosts, deadlines, or emergency-break usage. An in-progress break continues normally, with the updated enforcement applied when it ends.
 
 Allowlist edits and policy-mode changes apply only to future sessions. Reload first records any schedule already active under the old configuration, then evaluates the new configuration. A newly enabled schedule whose time window includes now starts immediately. Removing or editing a running schedule cannot weaken its captured restrictions or change its end time.
 
@@ -239,14 +244,16 @@ The helper runs in the installed user's GUI session, never as root. Its app regi
 
 The daemon manages only its own `/etc/hosts` section and PF anchor, `com.apple/000.lockin`. It does not rewrite `/etc/pf.conf`, replace other services' anchors, or globally disable PF. If the running filter ruleset is empty, it installs the standard `com.apple/*` anchor hook using a filter-only load. A nonempty incompatible ruleset is rejected rather than overwritten.
 
-- Blocklist domains use only `/etc/hosts`, including their `www.` variants. They are not resolved into firewall IP blocks, so shared hosting does not cause collateral blocking of unrelated domains.
-- Explicit blocklist IPv4/IPv6 addresses and CIDRs still use PF, including eviction of existing connections and blocking UDP/QUIC traffic.
-- Allowlists still use resolved IPv4/IPv6 destinations. Allowlist changes may flush PF's **global connection-state table** to stop already-established unlisted connections. This can interrupt other network connections; their firewall rules are not removed.
+- Blocklist domains always use `/etc/hosts`, including their `www.` variants. With `domain_pf.enabled: true`, non-excluded domains are also resolved into PF IP blocks so matching established TCP and UDP/QUIC connections are evicted.
+- A `domain_pf.exclude` entry and its implicit `www.` variant remain on hosts-only enforcement. Exclusion prevents that domain from contributing PF targets; it cannot guarantee reachability when another enforced domain resolves to the same IP.
+- Domain-derived PF blocking is opt-in because shared hosting can block unrelated domains on the same addresses. DNS answers can also be incomplete or stale; explicit IP/CIDR entries remain the deterministic option.
+- Explicit blocklist IPv4/IPv6 addresses and CIDRs always use PF, including eviction of existing connections and blocking UDP/QUIC traffic.
+- Allowlists use resolved IPv4/IPv6 destinations. Allowlist changes may flush PF's **global connection-state table** to stop already-established unlisted connections. This can interrupt other network connections; their firewall rules are not removed.
 - Loopback is excluded. Allowlists permit outbound TCP/UDP destination port 53, IPv4 DHCP 68→67, DHCPv6 546→547, and ICMPv6 neighbor/router discovery types 133–136. These infrastructure exceptions can take precedence over later PF rules for those packets.
-- Allowlist DNS is refreshed during reconciliation, normally every 30 seconds, with the last successful answers retained across failures and restarts. An allowed shared/CDN IP can also permit unrelated domains. Blocklist domains do not require DNS lookups.
-- Allowlist DNS lookups use the default resolver in `resolv.conf`, not macOS's complete scoped/split-DNS routing. VPN and enterprise DNS setups may need explicit IP entries.
-- A degraded allowlist DNS or firewall operation is reported as an error; available restrictive rules are retained rather than silently claiming success. A failed `start` can still leave a durably recorded session: inspect `status` before retrying.
-- Domain blocks depend on applications honoring `/etc/hosts`. Browser secure DNS, cached DNS or existing connections, direct IP access, and VPN/proxies can bypass them. Wildcard subdomains are not supported; list each required subdomain explicitly.
+- Allowlist and opted-in blocklist DNS are refreshed during reconciliation, normally every 30 seconds, with the last successful answers retained across failures and restarts. An allowed or blocked shared/CDN IP can affect unrelated domains.
+- Firewall DNS lookups use the default resolver in `resolv.conf`, not macOS's complete scoped/split-DNS routing. VPN and enterprise DNS setups may need explicit IP entries.
+- A degraded required DNS or firewall operation is reported as an error; available restrictive rules are retained rather than silently claiming success. A failed `start` or `reload` can still leave durably recorded state: inspect `status` before retrying.
+- Hosts-only domain blocks depend on applications honoring `/etc/hosts`. Browser secure DNS, cached DNS or existing connections, direct IP access, and VPN/proxies can bypass them. Wildcard subdomains are not supported; list each required subdomain explicitly.
 
 This is a focus tool, **not a security boundary against an administrator**. Root can change firewall rules, state, the clock, or the daemon. Forward clock changes can expire sessions. Proxies, VPN encapsulation, DNS tunnels, alternate addresses, and unlisted subdomains can bypass destination-based filtering. No claim of universal website blocking or privileged-tamper resistance is made.
 

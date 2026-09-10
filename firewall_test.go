@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -116,6 +117,57 @@ func TestDomainBlockDoesNotDenySharedAllowlistedAddress(t *testing.T) {
 	}
 	if firewallPermits(plan, "192.0.2.9") || firewallPermits(plan, "198.51.100.7") {
 		t.Fatal("explicit denial or allowlist enforcement was lost")
+	}
+}
+func TestDomainPFResolvesNonExcludedDomainsAndRetainsCache(t *testing.T) {
+	fw, err := NewFirewall(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	addresses := map[string]string{
+		"strict.example":     "192.0.2.10/32",
+		"www.strict.example": "2001:db8::10/128",
+	}
+	var calls []string
+	fw.lookup = func(domain string) ([]string, error) {
+		calls = append(calls, domain)
+		address, ok := addresses[domain]
+		if !ok {
+			return nil, errors.New("unexpected lookup")
+		}
+		return []string{address}, nil
+	}
+	policy := Policy{
+		Mode:  "blocklist",
+		Hosts: []string{"strict.example", "hosts-only.example", "203.0.113.0/24"},
+		DomainPF: &DomainPFConfig{
+			Enabled: true,
+			Exclude: []string{"hosts-only.example"},
+		},
+	}
+	plan, domains, err := fw.resolve([]Policy{policy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"strict.example", "www.strict.example"}; !reflect.DeepEqual(calls, want) {
+		t.Fatalf("DNS lookups = %v, want %v", calls, want)
+	}
+	if want := firewallUnique([]string{"192.0.2.10/32", "2001:db8::10/128", "203.0.113.0/24"}); !reflect.DeepEqual(plan.Blocked, want) {
+		t.Fatalf("PF blocks = %v, want %v", plan.Blocked, want)
+	}
+	if want := firewallUnique([]string{"strict.example", "www.strict.example", "hosts-only.example", "www.hosts-only.example"}); !reflect.DeepEqual(domains, want) {
+		t.Fatalf("hosts domains = %v, want %v", domains, want)
+	}
+
+	fw.lookup = func(string) ([]string, error) {
+		return nil, errors.New("DNS unavailable")
+	}
+	cached, _, err := fw.resolve([]Policy{policy})
+	if err == nil {
+		t.Fatal("DNS failure was not reported")
+	}
+	if !reflect.DeepEqual(cached, plan) {
+		t.Fatalf("DNS failure lost cached PF blocks: got %+v, want %+v", cached, plan)
 	}
 }
 

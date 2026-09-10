@@ -176,11 +176,21 @@ func civilTime(value time.Time) time.Time {
 	return time.Date(value.Year(), value.Month(), value.Day(), value.Hour(), value.Minute(), value.Second(), value.Nanosecond(), time.UTC)
 }
 
+func cloneDomainPF(cfg *DomainPFConfig) *DomainPFConfig {
+	if cfg == nil {
+		return nil
+	}
+	cloned := *cfg
+	cloned.Exclude = append([]string(nil), cfg.Exclude...)
+	return &cloned
+}
+
 func snapshotPolicy(cfg Config) Policy {
-	return Policy{Mode: cfg.Mode, Hosts: append([]string(nil), cfg.Hosts...)}
+	return Policy{Mode: cfg.Mode, Hosts: append([]string(nil), cfg.Hosts...), DomainPF: cloneDomainPF(cfg.DomainPF)}
 }
 
 // Reloads may add blocks, never remove them from a running blocklist session.
+// Domain PF controls only enforcement and therefore follows the latest config.
 // Copy on write preserves the committed policy if persistence later fails.
 func tightenBlocklists(state *State, cfg Config) {
 	if cfg.Mode != "blocklist" {
@@ -202,6 +212,7 @@ func tightenBlocklists(state *State, cfg Config) {
 			hosts = append(hosts, host)
 		}
 		session.Policy.Hosts = hosts
+		session.Policy.DomainPF = cloneDomainPF(cfg.DomainPF)
 	}
 }
 
